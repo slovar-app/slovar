@@ -4,7 +4,5 @@ tools/
 .chrome-profile*/
 .gh/
 .DS_Store
-dist/
-.netlify/
 
 # сгенерированный QR-код входит в приложение (нужен для офлайн-показа)
