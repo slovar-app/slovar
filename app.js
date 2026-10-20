@@ -5,7 +5,7 @@
   'use strict';
 
   const STORE_KEY = 'slovar.v1';
-  const APP_VERSION = '2.5.0';
+  const APP_VERSION = '2.5.1';
   const PUBLIC_APP_URL = 'https://slovar-app.github.io/slovar/';
 
   /* ───────────────────────── Утилиты ───────────────────────── */
@@ -168,6 +168,9 @@
       data.lastCleanup = data.lastCleanup || 0;
       data.pinnedTags = Array.isArray(data.pinnedTags) ? data.pinnedTags : [];
       data.topics = Array.isArray(data.topics) ? data.topics : [];
+      data.demoSeeded = data.demoSeeded !== undefined
+        ? !!data.demoSeeded
+        : (data.entries.length > 0 || data.topics.length > 0);
       return data;
     } catch (err) {
       return null;
@@ -361,7 +364,7 @@
   if (!db) db = {
     entries: [], settings: defaultSettings(),
     removed: [], history: [], backups: [], forceNewVersion: false,
-    seedCleared: true, lastCleanup: 0, pinnedTags: [], topics: [], v: 1
+    seedCleared: true, demoSeeded: false, lastCleanup: 0, pinnedTags: [], topics: [], v: 1
   };
 
   function makeEntry(raw) {
@@ -438,6 +441,46 @@
       ts: raw.ts || Date.now(),
       updated: raw.updated || raw.ts || Date.now()
     };
+  }
+
+  function seedDemoData() {
+    if (db.demoSeeded) return 0;
+    const demo = window.DEMO_DATA;
+    if (!demo) return 0;
+
+    const known = new Set(db.entries.map(function (e) {
+      return (e.zh + '|' + e.ru).toLowerCase();
+    }));
+    const added = [];
+    (demo.entries || []).forEach(function (raw) {
+      const entry = makeEntry(raw);
+      const key = (entry.zh + '|' + entry.ru).toLowerCase();
+      if (known.has(key)) return;
+      db.entries.push(entry);
+      known.add(key);
+      added.push(entry);
+    });
+
+    let addedTopic = false;
+    if (demo.topic && (demo.topic.zh || demo.topic.ru)) {
+      db.topics = db.topics || [];
+      const topicKey = (String(demo.topic.zh || '') + '|' + String(demo.topic.ru || '')).toLowerCase();
+      const exists = db.topics.some(function (t) {
+        return (String(t.zh || '') + '|' + String(t.ru || '')).toLowerCase() === topicKey;
+      });
+      if (!exists) {
+        db.topics.unshift(makeTopic(demo.topic));
+        addedTopic = true;
+      }
+    }
+
+    db.demoSeeded = true;
+    if (added.length) {
+      db.forceNewVersion = true;
+      recordAdditions(added);
+    }
+    saveDB();
+    return added.length + (addedTopic ? 1 : 0);
   }
 
   function topicById(id) {
@@ -2279,6 +2322,7 @@
       }
     }
 
+    db.demoSeeded = true;
     saveDB();
     applyTheme();
     closeSheet(true);
@@ -3286,7 +3330,7 @@
       db = {
         entries: [], settings: Object.assign(defaultSettings(), { theme }),
         removed: [], history: [], backups: [], forceNewVersion: false,
-        seedCleared: true, lastCleanup: 0, pinnedTags: [], topics: [], v: 1
+        seedCleared: true, demoSeeded: true, lastCleanup: 0, pinnedTags: [], topics: [], v: 1
       };
       saveDB();
       render();
@@ -3454,11 +3498,17 @@
 
   const removedSeed = cleanupLegacySeed();
   const removedOld = cleanupOldData();
+  const demoAdded = seedDemoData();
 
   history.replaceState({ view: 'tags', tag: null, query: '', topicId: null }, '');
   render();
   handleEntryParams();
 
+  if (demoAdded) {
+    setTimeout(function () {
+      toast('Добавлены примеры: теги и диалог «Знакомство»');
+    }, 1800);
+  }
   if (removedSeed) {
     setTimeout(function () {
       toast('Удалено стартовых фраз: ' + removedSeed + ' · копия сохранена');
