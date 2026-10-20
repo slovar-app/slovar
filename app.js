@@ -5,7 +5,7 @@
   'use strict';
 
   const STORE_KEY = 'slovar.v1';
-  const APP_VERSION = '2.5.1';
+  const APP_VERSION = '2.5.2';
   const PUBLIC_APP_URL = 'https://slovar-app.github.io/slovar/';
 
   /* ───────────────────────── Утилиты ───────────────────────── */
@@ -333,8 +333,12 @@
     }
 
     const items = (exact ? [exact] : []).concat(similar);
+    const tagsToAdd = exact ? newTagsForEntry(exact, sheetTags) : [];
+    const title = exact
+      ? (tagsToAdd.length ? 'Такая фраза уже есть — теги добавятся' : 'Такая фраза уже есть')
+      : 'Похожие фразы';
     box.hidden = false;
-    box.innerHTML = '<div class="dup-hint-title">' + (exact ? 'Такая фраза уже есть' : 'Похожие фразы') + '</div>' +
+    box.innerHTML = '<div class="dup-hint-title">' + title + '</div>' +
       items.map(function (e) {
         const sub = [e.py, e.zh && e.ru ? e.ru : '', e.tags.join(', ')].filter(Boolean).join(' · ');
         return '<button type="button" class="dup-item" data-act="open-existing" data-id="' + esc(e.id) + '">' +
@@ -813,6 +817,52 @@
       .replace(/[^\p{L}\p{N}]+/gu, '');
   }
 
+  function entryKey(zh, ru) {
+    return normKey(zh) + '|' + normKey(ru);
+  }
+
+  function newTagsForEntry(entry, tags) {
+    const known = new Set(((entry && entry.tags) || []).map(function (t) {
+      return String(t).trim().toLowerCase();
+    }));
+    return (tags || []).map(function (t) { return String(t).trim(); }).filter(function (t) {
+      return t && !known.has(t.toLowerCase());
+    });
+  }
+
+  function mergeTagsInto(entry, tags) {
+    if (!entry) return [];
+    entry.tags = Array.isArray(entry.tags) ? entry.tags : [];
+    const added = newTagsForEntry(entry, tags);
+    added.forEach(function (t) { entry.tags.push(t); });
+    return added;
+  }
+
+  function duplicateTagInfo(list) {
+    const rows = list || [];
+    if (!rows.length) return { same: true, distinct: [] };
+
+    const signatures = rows.map(function (e) {
+      const tags = Array.from(new Set(((e.tags || []).map(function (t) {
+        return String(t).trim().toLowerCase();
+      }).filter(Boolean)))).sort();
+      return tags.join('|');
+    });
+    const same = signatures.every(function (s) { return s === signatures[0]; });
+
+    const distinct = [];
+    const seen = new Set();
+    rows.forEach(function (e) {
+      (e.tags || []).forEach(function (t) {
+        const low = String(t).toLowerCase();
+        if (seen.has(low)) return;
+        seen.add(low);
+        distinct.push(t);
+      });
+    });
+    return { same: same, distinct: distinct };
+  }
+
   function findExactDup(zh, ru, excludeId) {
     const z = normKey(zh);
     const r = normKey(ru);
@@ -862,14 +912,23 @@
     const seen = new Set();
 
     function addSimilar(kind, list) {
-      if (list.length < 2) return;
-      const zs = new Set(list.map(function (e) { return normKey(e.zh); }));
-      const rs = new Set(list.map(function (e) { return normKey(e.ru); }));
+      // Одну и ту же точную пару не показываем второй раз в «похожих».
+      const unique = [];
+      const exactKeys = new Set();
+      list.forEach(function (e) {
+        const k = normKey(e.zh) + '|' + normKey(e.ru);
+        if (exactKeys.has(k)) return;
+        exactKeys.add(k);
+        unique.push(e);
+      });
+      if (unique.length < 2) return;
+      const zs = new Set(unique.map(function (e) { return normKey(e.zh); }));
+      const rs = new Set(unique.map(function (e) { return normKey(e.ru); }));
       if (zs.size === 1 && rs.size === 1) return; // это точный дубликат
-      const sig = list.map(function (e) { return e.id; }).sort().join(',');
+      const sig = unique.map(function (e) { return e.id; }).sort().join(',');
       if (seen.has(sig)) return;
       seen.add(sig);
-      similar.push({ kind: kind, list: list });
+      similar.push({ kind: kind, list: unique });
     }
 
     zhMap.forEach(function (list) { addSimilar('zh', list); });
@@ -1848,9 +1907,13 @@
     const historyCount = (db.history || []).length;
     const backupCount = (db.backups || []).length;
     const dups = buildDuplicateGroups();
-    const dupExtra = dups.exact.reduce(function (n, g) { return n + g[1].length - 1; }, 0);
-    const dupSummary = (dupExtra || dups.similar.length)
-      ? (dupExtra ? 'Лишних точных: ' + dupExtra : 'Точных нет') + (dups.similar.length ? ' · похожих групп: ' + dups.similar.length : '')
+    const crossTagGroups = dups.exact.filter(function (g) {
+      return !duplicateTagInfo(g[1]).same;
+    }).length;
+    const dupSummary = (dups.exact.length || dups.similar.length)
+      ? 'Одинаковых: ' + dups.exact.length +
+        (crossTagGroups ? ' · в разных тегах: ' + crossTagGroups : '') +
+        (dups.similar.length ? ' · похожих: ' + dups.similar.length : '')
       : 'Не найдены';
     return '' +
       '<div class="stat-grid">' +
@@ -1964,7 +2027,19 @@
         '<div class="row-title" style="font-size:15px">' + esc(e.zh || e.ru) + '</div>' +
         '<div class="row-sub">' + esc(sub) + '</div>' +
       '</div>' +
+      '<button class="icon-btn" data-act="dup-edit" data-id="' + esc(e.id) + '" aria-label="Редактировать фразу">' + ICONS.pencil + '</button>' +
       '<button class="icon-btn" data-act="dup-delete" data-id="' + esc(e.id) + '" aria-label="Удалить">' + ICONS.trash + '</button>' +
+    '</div>';
+  }
+
+  function duplicateTagNote(list) {
+    const info = duplicateTagInfo(list);
+    if (info.same) return '<div class="dup-tag-note">Дубликат в одном теге</div>';
+    const singleTags = list.every(function (e) { return (e.tags || []).length === 1; });
+    return '<div class="dup-tag-note is-warn">' +
+      (singleTags
+        ? 'Одно слово в разных тегах — объедините теги'
+        : 'Одинаковые фразы с разными наборами тегов') +
     '</div>';
   }
 
@@ -1972,13 +2047,17 @@
     const first = list[0];
     const sub = [first.py, first.zh && first.ru ? first.ru : '',
       list.length + ' ' + plural(list.length, 'запись', 'записи', 'записей')].filter(Boolean).join(' · ');
+    const crossTag = !duplicateTagInfo(list).same;
     return '<div class="card dup-group">' +
       '<div class="dup-head">' +
         '<div class="row-main">' +
           '<div class="dup-key">' + esc(first.zh || first.ru) + '</div>' +
           '<div class="dup-sub">' + esc(sub) + '</div>' +
+          duplicateTagNote(list) +
         '</div>' +
-        '<button class="btn btn-ghost" data-act="dup-keep" data-key="' + esc(key) + '" style="padding:8px 12px;font-size:13px">Оставить одну</button>' +
+        '<button class="btn btn-ghost" data-act="dup-keep" data-key="' + esc(key) + '" style="padding:8px 12px;font-size:13px">' +
+          (crossTag ? 'Объединить теги' : 'Оставить одну') +
+        '</button>' +
       '</div>' +
       list.map(dupRow).join('') +
     '</div>';
@@ -1988,10 +2067,11 @@
     const first = group.list[0];
     const head = group.kind === 'zh' ? first.zh : first.ru;
     const label = group.kind === 'zh' ? 'одинаковый китайский' : 'одинаковый перевод';
+    const tagLabel = duplicateTagInfo(group.list).same ? 'в одном теге' : 'в разных тегах';
     return '<div class="card dup-group">' +
       '<div class="dup-head"><div class="row-main">' +
         '<div class="dup-key">' + esc(head) + '</div>' +
-        '<div class="dup-sub">' + label + ' · ' + group.list.length + ' ' + plural(group.list.length, 'запись', 'записи', 'записей') + '</div>' +
+        '<div class="dup-sub">' + label + ' · ' + tagLabel + ' · ' + group.list.length + ' ' + plural(group.list.length, 'запись', 'записи', 'записей') + '</div>' +
       '</div></div>' +
       group.list.map(dupRow).join('') +
     '</div>';
@@ -2106,16 +2186,16 @@
       return emptyState('✓', 'Дубликатов нет', 'Все фразы в словаре уникальны.');
     }
 
-    let html = '';
+    let html = '<p class="search-hint" style="margin:0 0 12px">Сравнение не учитывает регистр, пробелы и знаки препинания: «Привет» и «Привет!» — одна фраза.</p>';
     if (groups.exact.length) {
-      html += '<div class="section-head"><h2>Точные дубликаты</h2><span class="count">' + groups.exact.length + '</span></div>';
+      html += '<div class="section-head"><h2>Одинаковые фразы</h2><span class="count">' + groups.exact.length + '</span></div>';
       html += groups.exact.map(function (g) { return exactGroupCard(g[0], g[1]); }).join('');
     }
     if (groups.similar.length) {
       html += '<div class="section-head"><h2>Похожие фразы</h2><span class="count">' + groups.similar.length + '</span></div>';
       html += groups.similar.map(similarGroupCard).join('');
     }
-    html += '<p class="search-hint" style="margin-top:16px">«Оставить одну» объединяет теги и заметки, лишние записи удаляет.</p>';
+    html += '<p class="search-hint" style="margin-top:16px">Кнопка в группе объединяет теги и заметки, лишние записи удаляет. Карандаш открывает редактирование.</p>';
     return html;
   }
 
@@ -2297,15 +2377,23 @@
       if (Array.isArray(data.topics)) db.topics = data.topics.map(function (t) { return makeTopic(t); });
       db.forceNewVersion = true;
     } else {
-      const key = e => (e.zh + '|' + e.ru).toLowerCase();
-      const known = new Set(db.entries.map(key));
+      const known = new Map();
+      db.entries.forEach(function (e) {
+        const k = entryKey(e.zh, e.ru);
+        if (!known.has(k)) known.set(k, e);
+      });
       const addedEntries = [];
-      incoming.forEach(e => {
-        if (!known.has(key(e))) {
-          db.entries.push(e);
-          known.add(key(e));
-          addedEntries.push(e);
+      incoming.forEach(function (e) {
+        const k = entryKey(e.zh, e.ru);
+        const existing = known.get(k);
+        if (existing) {
+          mergeTagsInto(existing, e.tags);
+          if (!existing.note && e.note) existing.note = e.note;
+          return;
         }
+        db.entries.push(e);
+        known.set(k, e);
+        addedEntries.push(e);
       });
       recordAdditions(addedEntries);
       if (Array.isArray(data.pinnedTags)) {
@@ -2554,6 +2642,7 @@
     const input = $('#tag-input');
     if (input) { input.value = ''; input.focus(); }
     renderTagSuggestions('');
+    scheduleDupHint();
   }
 
   function renderSheetTags() {
@@ -2576,6 +2665,7 @@
         sheetTags.pop();
         renderSheetTags();
         renderTagSuggestions('');
+        scheduleDupHint();
       }
     });
     $$('[data-remove-tag]', box).forEach(btn => {
@@ -2584,6 +2674,7 @@
         sheetTags.splice(Number(btn.dataset.removeTag), 1);
         renderSheetTags();
         renderTagSuggestions($('#tag-input') ? $('#tag-input').value : '');
+        scheduleDupHint();
       });
     });
   }
@@ -2610,6 +2701,18 @@
     });
   }
 
+  function resetEntrySheetForMore() {
+    $('#in-zh').value = '';
+    $('#in-py').value = '';
+    $('#in-ru').value = '';
+    $('#in-note').value = '';
+    sheetFav = false;
+    const starBtn = $('[data-act="toggle-sheet-fav"]');
+    if (starBtn) starBtn.classList.remove('is-on');
+    sheetPyState.touched = false;
+    $('#in-zh').focus();
+  }
+
   function saveEntryFromSheet(andMore) {
     const zh = $('#in-zh').value.trim();
     const ru = $('#in-ru').value.trim();
@@ -2626,6 +2729,25 @@
     const exact = findExactDup(zh, ru, sheetEntryId);
     if (exact) {
       const label = (exact.zh || exact.ru) + (exact.zh && exact.ru ? ' — ' + exact.ru : '');
+      const addTags = !sheetEntryId ? newTagsForEntry(exact, sheetTags) : [];
+      if (addTags.length) {
+        if (confirm('Такая фраза уже есть:\n' + label + '\n\nДобавить теги: ' +
+          addTags.map(function (t) { return '«' + t + '»'; }).join(', ') + '?')) {
+          mergeTagsInto(exact, addTags);
+          if (!exact.note && note) exact.note = note;
+          if (!exact.fav && sheetFav) exact.fav = true;
+          saveDB();
+          if (andMore) {
+            resetEntrySheetForMore();
+            toast('Теги добавлены — можно следующую');
+          } else {
+            closeSheet(true);
+            render();
+            toast('Фраза уже есть — теги добавлены');
+          }
+        }
+        return;
+      }
       if (confirm('Такая фраза уже есть:\n' + label + '\n\nОткрыть её?')) {
         openEntry(exact.id, null, '', true);
       }
@@ -2663,15 +2785,7 @@
     saveDB();
 
     if (andMore) {
-      $('#in-zh').value = '';
-      $('#in-py').value = '';
-      $('#in-ru').value = '';
-      $('#in-note').value = '';
-      sheetFav = false;
-      const starBtn = $('[data-act="toggle-sheet-fav"]');
-      if (starBtn) starBtn.classList.remove('is-on');
-      sheetPyState.touched = false;
-      $('#in-zh').focus();
+      resetEntrySheetForMore();
       toast('Добавлено — можно следующую');
       return;
     }
@@ -2785,25 +2899,47 @@
 
   function batchPlan() {
     const rows = parseBatch($('#batch-text') ? $('#batch-text').value : '');
-    const existing = new Set(db.entries.map(function (e) { return (e.zh + '|' + e.ru).toLowerCase(); }));
-    const seen = new Set();
+    const defaultTag = $('#batch-tag') ? $('#batch-tag').value.trim() : '';
+    const knownTags = new Map();
+    db.entries.forEach(function (e) {
+      const key = entryKey(e.zh, e.ru);
+      if (knownTags.has(key)) return;
+      knownTags.set(key, new Set((e.tags || []).map(function (t) { return String(t).toLowerCase(); })));
+    });
+
     let fresh = 0;
     let dup = 0;
+    let tagAdds = 0;
     rows.forEach(function (r) {
-      const key = (r.zh + '|' + r.ru).toLowerCase();
-      if (existing.has(key) || seen.has(key)) { dup++; return; }
-      seen.add(key);
-      fresh++;
+      const key = entryKey(r.zh, r.ru);
+      const tags = (r.tags.length ? r.tags : (defaultTag ? [defaultTag] : []))
+        .map(function (t) { return String(t).trim(); })
+        .filter(Boolean);
+      if (knownTags.has(key)) {
+        dup++;
+        const current = knownTags.get(key);
+        tags.forEach(function (t) {
+          const low = t.toLowerCase();
+          if (current.has(low)) return;
+          current.add(low);
+          tagAdds++;
+        });
+      } else {
+        fresh++;
+        knownTags.set(key, new Set(tags.map(function (t) { return t.toLowerCase(); })));
+      }
     });
-    return { rows: rows, fresh: fresh, dup: dup };
+    return { rows: rows, fresh: fresh, dup: dup, tagAdds: tagAdds, canAdd: fresh > 0 || tagAdds > 0 };
   }
 
   function updateBatchPreview() {
     const plan = batchPlan();
     const btn = $('#batch-import-btn');
     if (btn) {
-      btn.disabled = plan.fresh === 0;
-      btn.textContent = plan.fresh ? 'Добавить ' + plan.fresh : 'Добавить';
+      btn.disabled = !plan.canAdd;
+      btn.textContent = plan.fresh
+        ? 'Добавить ' + plan.fresh
+        : (plan.tagAdds ? 'Добавить теги' : 'Добавить');
     }
     const info = $('#batch-preview');
     if (info) {
@@ -2812,6 +2948,7 @@
       } else {
         info.textContent = 'Строк: ' + plan.rows.length +
           ' · новых: ' + plan.fresh +
+          (plan.tagAdds ? ' · новых тегов: ' + plan.tagAdds : '') +
           (plan.dup ? ' · уже есть: ' + plan.dup : '');
       }
     }
@@ -2878,27 +3015,39 @@
 
   function applyBatchImport() {
     const plan = batchPlan();
-    if (!plan.fresh) { toast('Нет новых строк для добавления'); return; }
+    if (!plan.canAdd) { toast('Нет новых фраз или тегов'); return; }
 
     const defaultTag = $('#batch-tag') ? $('#batch-tag').value.trim() : '';
-    const existing = new Set(db.entries.map(function (e) { return (e.zh + '|' + e.ru).toLowerCase(); }));
+    const byKey = new Map();
+    db.entries.forEach(function (e) {
+      const key = entryKey(e.zh, e.ru);
+      if (!byKey.has(key)) byKey.set(key, e);
+    });
     const addedEntries = [];
+    let mergedTags = 0;
 
     plan.rows.forEach(function (r) {
-      const key = (r.zh + '|' + r.ru).toLowerCase();
-      if (existing.has(key)) return;
-      const tags = r.tags.length ? r.tags : (defaultTag ? [defaultTag] : []);
+      const key = entryKey(r.zh, r.ru);
+      const tags = (r.tags.length ? r.tags : (defaultTag ? [defaultTag] : []))
+        .map(function (t) { return String(t).trim(); })
+        .filter(Boolean);
+      if (byKey.has(key)) {
+        mergedTags += mergeTagsInto(byKey.get(key), tags).length;
+        return;
+      }
       const entry = makeEntry({ zh: r.zh, ru: r.ru, tags: tags });
       db.entries.unshift(entry);
+      byKey.set(key, entry);
       addedEntries.push(entry);
-      existing.add(key);
     });
 
     recordAdditions(addedEntries);
     saveDB();
     closeSheet(true);
     render();
-    toast('Добавлено: ' + addedEntries.length + (plan.dup ? ' · пропущено дублей: ' + plan.dup : ''));
+    toast('Добавлено: ' + addedEntries.length +
+      (mergedTags ? ' · тегов: ' + mergedTags : '') +
+      (plan.dup ? ' · совпало: ' + plan.dup : ''));
   }
 
   /* ───────────────────────── «Поделиться» и ярлык ---------- */
@@ -3210,6 +3359,11 @@
       return;
     }
 
+    if (act === 'dup-edit') {
+      openEntry(actionEl.dataset.id, null, '', true);
+      return;
+    }
+
     if (act === 'dup-delete') {
       const e = entryById(actionEl.dataset.id);
       if (!e) return;
@@ -3225,7 +3379,10 @@
       const found = buildDuplicateGroups().exact.filter(function (g) { return g[0] === key; })[0];
       if (!found) return;
       const list = found[1];
-      if (!confirm('Оставить одну фразу из ' + list.length + '? Теги и заметки объединятся, лишние записи удалятся.')) return;
+      const crossTag = !duplicateTagInfo(list).same;
+      if (!confirm((crossTag
+        ? 'Объединить ' + list.length + ' ' + plural(list.length, 'запись', 'записи', 'записей') + ' в одну? Теги и заметки объединятся, лишние записи удалятся.'
+        : 'Оставить одну фразу из ' + list.length + '? Теги и заметки объединятся, лишние записи удалятся.'))) return;
 
       const keeper = list.slice().sort(function (a, b) {
         return (b.note ? 1 : 0) - (a.note ? 1 : 0) ||
@@ -3240,7 +3397,16 @@
         if (e.fav) keeper.fav = true;
         markRemoved(e);
       });
-      keeper.tags = Array.from(new Set(keeper.tags));
+      const mergedTags = [];
+      const seenTags = new Set();
+      keeper.tags.forEach(function (t) {
+        const tag = String(t).trim();
+        const low = tag.toLowerCase();
+        if (!tag || seenTags.has(low)) return;
+        seenTags.add(low);
+        mergedTags.push(tag);
+      });
+      keeper.tags = mergedTags;
 
       const ids = new Set(list.map(function (e) { return e.id; }));
       db.entries = db.entries.filter(function (e) { return !ids.has(e.id) || e.id === keeper.id; });

@@ -1,5 +1,5 @@
 /* Service worker «Словарика»: сеть — в приоритете, кэш — офлайн-запас. */
-const CACHE = 'slovar-v20';
+const CACHE = 'slovar-v21';
 
 const ASSETS = [
   './',

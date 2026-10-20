@@ -915,3 +915,7 @@ body.selecting .toast { bottom: calc(94px + env(safe-area-inset-bottom)); }
   .share-lead { font-size: 13px; }
   .share-qr img { width: 190px; height: 190px; }
 }
+
+/* Пояснение к группе дублей: один тег или несколько */
+.dup-tag-note { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.dup-tag-note.is-warn { color: var(--accent); font-weight: 600; }
